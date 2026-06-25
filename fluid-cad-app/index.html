@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Ultimate Mech-Fluid CAD v3</title>
+    <style>
+        body {
+            margin: 0; padding: 0;
+            background-color: #0d0f12; color: #fff;
+            font-family: sans-serif; overflow: hidden;
+        }
+        #container { display: flex; flex-direction: column; align-items: center; width: 100vw; height: 100vh; }
+        header { width: 100%; padding: 6px 0; text-align: center; background: #161b22; font-size: 12px; font-weight: bold; border-bottom: 1px solid #30363d; }      
+                canvas { 
+            background: #010409; 
+            border-bottom: 2px solid #30363d; 
+            max-width: 100%; 
+            touch-action: none; 
+            -webkit-user-select: none; /* 文字選択を禁止 */
+            user-select: none; 
+        }
+   
+        .controls { display: flex; flex-direction: column; gap: 6px; padding: 8px; width: 100%; box-sizing: border-box; }
+        .btn-group { display: flex; gap: 6px; width: 100%; }
+        button {
+            background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+            padding: 8px; border-radius: 6px; font-size: 11px; font-weight: bold;
+            flex: 1; box-shadow: 0 2px 4px rgba(0,0,0,0.5); transition: all 0.1s;
+        }
+        button:active { transform: scale(0.96); }
+        button.active { background: #1f6feb; color: white; border-color: #388bfd; }
+        button.danger { background: #da3633; color: white; border-color: #f85149; }
+        button.success { background: #238636; color: white; border-color: #2ea043; }
+        #stats { font-size: 11px; color: #8b949e; text-align: center; background: #161b22; padding: 4px; border-radius: 4px; border: 1px solid #30363d; }
+    </style>
+</head>
+<body>
+
+<div id="container">
+    <header>ロボット・エンジン設計：CAD×機構×三流体シミュレータ v3</header>
+    <canvas id="simCanvas"></canvas>
+    
+    <div class="controls">
+        <!-- CADモード切替 -->
+        <div class="btn-group">
+            <button id="modeDrawBtn" class="active">CAD: 描画</button>
+            <button id="modeEraseBtn">CAD: 消しゴム</button>
+            <button id="modeMoveBtn">CAD: パーツ配置</button>
+        </div>
+        <!-- 流体・機構コントロール -->
+        <div class="btn-group">
+            <button id="fluidBtn">流体: 水(H2O)</button>
+            <button id="mechBtn">機構: 停止中</button>
+        </div>
+        <!-- データセーブ＆クリア -->
+        <div class="btn-group">
+            <button id="saveBtn" class="success">端末に保存</button>
+            <button id="loadBtn" class="success">読み込み</button>
+            <button id="clearBtn" class="danger">全クリア</button>
+        </div>
+        <div id="stats">
+            粘性: <span id="fluidType" style="color:#58a6ff; font-weight:bold;">標準</span> | 
+            最大圧力: <span id="maxPressure" style="color:#f85149; font-weight:bold;">0</span> | 
+            最高流速: <span id="maxVelocity" style="color:#bc8cff; font-weight:bold;">0</span> px/s
+        </div>
+    </div>
+</div>
+
+<script>
+const canvas = document.getElementById('simCanvas');
+const ctx = canvas.getContext('2d');
+
+function resizeCanvas() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight * 0.48; // スマホUI用に調整
+}
+resizeCanvas();
+
+// --- 状態管理 ---
+let cadMode = 'DRAW'; // 'DRAW', 'ERASE', 'MOVE'
+let mechMode = 0;     // 0:停止, 1:ピストン(上下), 2:回転(プロペラ)
+let fluidMode = 1;    // 0:空気, 1:水, 2:油
+let isDrawing = false;
+
+// --- 物理パラメータ（流体設定） ---
+let baseSpeed = 4;
+let fluidViscosity = 0.08; // 復元力（粘性低＝空気、粘性高＝油）
+let fluidColor = '#4ea8de';
+
+function updateFluidProperties() {
+    const txt = document.getElementById('fluidType');
+    if (fluidMode === 0) {
+        baseSpeed = 6; fluidViscosity = 0.15; fluidColor = '#a5d6a7'; // 空気（サクサク流れる）
+        txt.innerText = '空気 (Gas)'; txt.style.color = '#a5d6a7';
+    } else if (fluidMode === 1) {
+        baseSpeed = 4; fluidViscosity = 0.08; fluidColor = '#58a6ff'; // 水
+        txt.innerText = '水 (Water)'; txt.style.color = '#58a6ff';
+    } else if (fluidMode === 2) {
+        baseSpeed = 1.5; fluidViscosity = 0.02; fluidColor = '#ffb703'; // 油（ねっとり、遅い）
+        txt.innerText = '油 (Oil)'; txt.style.color = '#ffb703';
+    }
+}
+
+// --- CADデータ ---
+let drawnWalls = [];
+
+// --- 機構パーツ ---
+const component = {
+    x: canvas.width / 2, y: canvas.height / 2,
+    width: 90, height: 25, baseY: canvas.height / 2, angle: 0
+};
+
+// --- 流体粒子 ---
+const particles = [];
+const maxParticles = 350; // 動作安定のための最適値
+
+class Particle {
+    constructor(x, y) {
+        this.x = x; this.y = y;
+        this.vx = Math.random() * 2 + baseSpeed;
+        this.vy = (Math.random() - 0.5) * 0.5;
+        this.pressure = 0;
+    }
+    respawn() {
+        this.x = 0; this.y = Math.random() * canvas.height;
+        this.vx = Math.random() * 2 + baseSpeed;
+        this.vy = (Math.random() - 0.5) * 0.5;
+    }
+}
+for(let i=0; i<maxParticles; i++) particles.push(new Particle(Math.random() * canvas.width, Math.random() * canvas.height));
+
+// --- タッチ・マウス操作 (CAD・消しゴム・移動) ---
+function getEventPos(e) {
+    const rect = canvas.getBoundingClientRect();
+    const clientX = e.touches ? e.touches.clientX : e.clientX;
+    const clientY = e.touches ? e.touches.clientY : e.clientY;
+    return { x: clientX - rect.left, y: clientY - rect.top };
+}
+
+function startAction(e) {
+    const pos = getEventPos(e);
+    isDrawing = true;
+    if (cadMode === 'DRAW') {
+        drawnWalls.push({ x: pos.x, y: pos.y });
+    } else if (cadMode === 'ERASE') {
+        eraseWallAt(pos.x, pos.y);
+    } else if (cadMode === 'MOVE') {
+        component.x = pos.x; component.y = pos.y; component.baseY = pos.y;
+    }
+}
+
+function moveAction(e) {
+    if (!isDrawing) return;
+    const pos = getEventPos(e);
+    if (cadMode === 'DRAW') {
+        const last = drawnWalls[drawnWalls.length - 1];
+        if (!last || Math.hypot(pos.x - last.x, pos.y - last.y) > 8) drawnWalls.push({ x: pos.x, y: pos.y });
+    } else if (cadMode === 'ERASE') {
+        eraseWallAt(pos.x, pos.y);
+    }
+}
+
+function eraseWallAt(x, y) {
+    // タッチ半径20px以内のCAD壁を消去
+    drawnWalls = drawnWalls.filter(w => Math.hypot(w.x - x, w.y - y) > 20);
+}
+
+canvas.addEventListener('mousedown', startAction); canvas.addEventListener('mousemove', moveAction);
+window.addEventListener('mouseup', () => isDrawing = false);
+canvas.addEventListener('touchstart', startAction); canvas.addEventListener('touchmove', moveAction);
+window.addEventListener('touchend', () => isDrawing = false);
+
+// --- UI制御設定 ---
+const btns = {
+    draw: document.getElementById('modeDrawBtn'), erase: document.getElementById('modeEraseBtn'), move: document.getElementById('modeMoveBtn'),
+    fluid: document.getElementById('fluidBtn'), mech: document.getElementById('mechBtn'),
+    save: document.getElementById('saveBtn'), load: document.getElementById('loadBtn'), clear: document.getElementById('clearBtn')
+};
+
+function setActiveMode(mode) {
+    cadMode = mode;
+    btns.draw.classList.toggle('active', mode === 'DRAW');
+    btns.erase.classList.toggle('active', mode === 'ERASE');
+    btns.move.classList.toggle('active', mode === 'MOVE');
+}
+btns.draw.addEventListener('click', () => setActiveMode('DRAW'));
+btns.erase.addEventListener('click', () => setActiveMode('ERASE'));
+btns.move.addEventListener('click', () => setActiveMode('MOVE'));
+
+btns.fluid.addEventListener('click', () => {
+    fluidMode = (fluidMode + 1) % 3;
+    if (fluidMode === 0) btns.fluid.innerText = '流体: 空気(Gas)';
+    else if (fluidMode === 1) btns.fluid.innerText = '流体: 水(H2O)';
+    else if (fluidMode === 2) btns.fluid.innerText = '流体: 油(Oil)';
+    updateFluidProperties();
+});
+
+btns.mech.addEventListener('click', () => {
+    mechMode = (mechMode + 1) % 3;
+    if (mechMode === 0) { btns.mech.innerText = '機構: 停止中'; btns.mech.classList.remove('active'); }
+    else if (mechMode === 1) { btns.mech.innerText = '機構: ピストン'; btns.mech.classList.add('active'); }
+    else if (mechMode === 2) { btns.mech.innerText = '機構: 回転運動'; }
+});
+
+// セーブ・ロード機能（ブラウザのLocalStorageを活用）
+btns.save.addEventListener('click', () => {
+    localStorage.setItem('cad_wall_data', JSON.stringify(drawnWalls));
+    alert('CADデータをスマホ本体（ブラウザ）に保存しました！');
+});
+btns.load.addEventListener('click', () => {
+    const data = localStorage.getItem('cad_wall_data');
+    if (data) {
+        drawnWalls = JSON.parse(data);
+        alert('CADデータを読み込みました！');
+    } else {
+        alert('保存されたデータがありません。');
+    }
+});
+btns.clear.addEventListener('click', () => {
+    drawnWalls = []; component.x = canvas.width/2; component.y = canvas.height/2; component.baseY = canvas.height/2; component.angle = 0;
+});
+
+// --- メインループ ---
+let peakP = 0, peakV = 0;
+// スマホの画面全体のスクロールを強制的に禁止する魔法のコード
+document.body.addEventListener('touchmove', function(e) {
+    e.preventDefault();
+}, { passive: false });
+
+
+
+function animate() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    if (mechMode === 1) { component.angle += 0.05; component.y = component.baseY + Math.sin(component.angle) * 35; }
+    else if (mechMode === 2) { component.angle += 0.05; }
+
+    // 密度（圧力）計算
+    for (let i = 0; i < particles.length; i++) {
+        let dens = 0; const pi = particles[i];
+        for (let j = 0; j < particles.length; j++) {
+            if (i === j) continue;
+            if (Math.hypot(pi.x - particles[j].x, pi.y - particles[j].y) < 18) dens++;
+        }
+        pi.pressure = dens;
+    }
+
+    peakV = 0; peakP = 0;
+    const cos = Math.cos(component.angle), sin = Math.sin(component.angle);
+    const hw = component.width / 2, hh = component.height / 2;
+
+    particles.forEach(p => {
+        p.x += p.vx; p.y += p.vy;
+        if (p.vx < baseSpeed) p.vx += fluidViscosity;
+        if (p.vy > 0.4) p.vy -= fluidViscosity; if (p.vy < -0.4) p.vy += fluidViscosity;
+
+        // CAD壁衝突
+        drawnWalls.forEach(w => {
+            if (Math.hypot(p.x - w.x, p.y - w.y) < 12) {
+                p.vx = -0.3; p.vy += (p.y > w.y) ? 1.5 : -1.5;
+            }
+        });
+
+        // 機構パーツ衝突
+        const dx = p.x - component.x, dy = p.y - component.y;
+        const rx = dx * cos + dy * sin, ry = -dx * sin + dy * cos;
+        if (Math.abs(rx) < hw && Math.abs(ry) < hh) {
+            if (mechMode === 2) { p.vx = (rx > 0) ? baseSpeed + 2 : -1; p.vy = (ry > 0) ? 4 : -4; }
+
+

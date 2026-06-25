@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Fluid CAD - Keypad Zoom v4</title>
+    <style>
+        body { margin: 0; padding: 0; background-color: #0d0f12; color: #fff; font-family: sans-serif; overflow: hidden; position: fixed; width: 100%; height: 100%; }
+        #container { display: flex; flex-direction: column; align-items: center; width: 100vw; height: 100vh; }
+        header { width: 100%; padding: 4px 0; text-align: center; background: #161b22; font-size: 11px; font-weight: bold; border-bottom: 1px solid #30363d; z-index: 10; }
+        canvas { background: #010409; max-width: 100%; touch-action: none; }
+        .controls { display: flex; flex-direction: column; gap: 4px; padding: 6px; width: 100%; box-sizing: border-box; background: #0d0f12; z-index: 10; flex-grow: 1; overflow-y: auto; }
+        .btn-group { display: flex; gap: 4px; width: 100%; }
+        button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 6px; border-radius: 6px; font-size: 11px; font-weight: bold; flex: 1; }
+        button.active { background: #1f6feb; color: white; }
+        .dpad-container { display: flex; justify-content: center; align-items: center; margin-top: 2px; gap: 15px; }
+        .dpad { display: grid; grid-template-columns: repeat(3, 38px); grid-template-rows: repeat(3, 38px); gap: 3px; }
+        .dpad button { padding: 0; font-size: 14px; background: #30363d; border-radius: 4px; }
+        #actionBtn { width: 75px; height: 75px; border-radius: 50%; background: #238636; color: white; font-size: 12px; border: none; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        #actionBtn:active { background: #2ea043; }
+        #stats { font-size: 10px; color: #8b949e; text-align: center; background: #161b22; padding: 2px; border-radius: 4px; border: 1px solid #30363d; }
+    </style>
+</head>
+<body>
+<div id="container">
+    <header>②十字キー：マルチライン＆流体ON/OFF＆ズーム対応版</header>
+    <canvas id="simCanvas"></canvas>
+    <div class="controls">
+        <div class="btn-group">
+            <button id="modeDrawBtn" class="active">モード: 描画</button>
+            <button id="modeEraseBtn">モード: 消去</button>
+            <button id="modeMoveBtn">パーツ移動</button>
+        </div>
+        <div class="btn-group">
+            <button id="fluidBtn">流体: 水</button>
+            <button id="fluidToggleBtn" class="active">流体表示: ON</button>
+            <button id="mechBtn">機構: 停止</button>
+            <button id="clearBtn" style="background:#da3633;">全クリア</button>
+        </div>
+        <div id="stats">
+            ズーム: <span id="zoomVal" style="color:#58a6ff;">100</span>% | 
+            最大圧: <span id="maxPressure" style="color:#f85149;">0</span> | 
+            最高速: <span id="maxVelocity" style="color:#bc8cff;">0</span> px/s
+        </div>
+        <div class="dpad-container">
+            <div class="dpad">
+                <div></div><button id="btnUp">▲</button><div></div>
+                <button id="btnLeft">◀</button><div style="background:#161b22; border-radius:4px;"></div><button id="btnRight">▶</button>
+                <div></div><button id="btnDown">▼</button><div></div>
+            </div>
+            <button id="actionBtn">線を引く<br>/配置</button>
+        </div>
+    </div>
+</div>
+<script>
+document.body.addEventListener('touchmove', function(e) { e.preventDefault(); }, { passive: false });
+const canvas = document.getElementById('simCanvas');
+const ctx = canvas.getContext('2d');
+
+let pointer = { x: 0, y: 0 };
+let component = { x: 0, y: 0, width: 80, height: 20, angle: 0 };
+let scale = 1.0; let lastTouchDist = 0; let showFluid = true;
+let isNewLine = true; // 新しい線の判定用フラグ
+
+function resizeCanvas() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight * 0.42;
+    if (pointer.x === 0) {
+        pointer.x = canvas.width / 2;
+        pointer.y = canvas.height / 2;
+        component.x = canvas.width / 2;
+        component.y = canvas.height / 2 - 30;
+    }
+}
+
+let cadMode = 'DRAW'; let mechMode = 0; let fluidMode = 1;
+let baseSpeed = 4; let fluidViscosity = 0.08; let fluidColor = '#58a6ff';
+let drawnWalls = []; const particles = []; const maxParticles = 200;
+
+class Particle {
+    constructor() { this.respawn(); this.x = Math.random() * canvas.width; }
+    respawn() { this.x = 0; this.y = Math.random() * canvas.height; this.vx = Math.random() * 2 + baseSpeed; this.vy = (Math.random() - 0.5) * 0.5; this.pressure = 0; }
+}
+for(let i=0; i<maxParticles; i++) particles.push(new Particle());
+
+// 2本指ズームのイベントだけキャンバスに登録
+canvas.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 2) {
+        lastTouchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+    }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+    if (e.touches.length === 2) {
+        const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+        if (lastTouchDist > 0) {
+            const factor = dist / lastTouchDist;
+            scale = Math.max(0.5, Math.min(3.0, scale * factor));
+            document.getElementById('zoomVal').innerText = Math.round(scale * 100);
+        }
+        lastTouchDist = dist;
+    }
+}, { passive: false });
+
+canvas.addEventListener('touchend', () => { lastTouchDist = 0; });
+
+const keys = { Up: false, Down: false, Left: false, Right: false };
+function setupDpad(id, key) {
+    const b = document.getElementById(id);
+    b.addEventListener('touchstart', (e) => { e.preventDefault(); keys[key] = true; });
+    b.addEventListener('touchend', () => { keys[key] = false; isNewLine = true; }); // ボタンを離したら次の線は新しくする
+}
+setupDpad('btnUp', 'Up'); setupDpad('btnDown', 'Down'); setupDpad('btnLeft', 'Left'); setupDpad('btnRight', 'Right');
+
+const actionBtn = document.getElementById('actionBtn');
+actionBtn.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    // スケールを考慮した座標に変換
+    const targetX = pointer.x / scale;
+    const targetY = pointer.y / scale;
+    
+    if (cadMode === 'DRAW') {
+        if (isNewLine) {
+            drawnWalls.push([{ x: targetX, y: targetY }]);
+            isNewLine = false; // 押し続けている間は同じ線にする
+        } else if (drawnWalls.length > 0) {
+            drawnWalls[drawnWalls.length - 1].push({ x: targetX, y: targetY });
+        }
+    } else if (cadMode === 'ERASE') {
+        drawnWalls = drawnWalls.map(line => line.filter(w => Math.hypot(w.x - targetX, w.y - targetY) > 20)).filter(line => line.length > 0);
+    } else if (cadMode === 'MOVE') {
+        component.x = targetX; component.y = targetY;
+    }
+});
+actionBtn.addEventListener('touchend', () => { isNewLine = true; });
+
+function updatePointer() {
+    const step = 4;
+    if (keys.Up) pointer.y = Math.max(0, pointer.y - step);
+    if (keys.Down) pointer.y = Math.min(canvas.height, pointer.y + step);
+    if (keys.Left) pointer.x = Math.max(0, pointer.x - step);
+    if (keys.Right) pointer.x = Math.min(canvas.width, pointer.x + step);
+}
+
+const btns = { 
+    draw: document.getElementById('modeDrawBtn'), erase: document.getElementById('modeEraseBtn'), move: document.getElementById('modeMoveBtn'), 
+    fluid: document.getElementById('fluidBtn'), fluidToggle: document.getElementById('fluidToggleBtn'), mech: document.getElementById('mechBtn'), clear: document.getElementById('clearBtn') 
+};
+function setMode(m) { cadMode = m; btns.draw.classList.toggle('active', m === 'DRAW'); btns.erase.classList.toggle('active', m === 'ERASE'); btns.move.classList.toggle('active', m === 'MOVE'); }
+btns.draw.addEventListener('click', () => setMode('DRAW')); btns.erase.addEventListener('click', () => setMode('ERASE')); btns.move.addEventListener('click', () => setMode('MOVE'));
+
+btns.fluidToggle.addEventListener('click', () => {
+    showFluid = !showFluid;
+    btns.fluidToggle.innerText = showFluid ? '流体表示: ON' : '流体表示: OFF';
+    btns.fluidToggle.classList.toggle('active', showFluid);
+});
+
+btns.fluid.addEventListener('click', () => { fluidMode = (fluidMode + 1) % 3; if(fluidMode===0){baseSpeed=6;fluidViscosity=0.15;fluidColor='#a5d6a7';}else if(fluidMode===1){baseSpeed=4;fluidViscosity=0.08;fluidColor='#58a6ff';}else{baseSpeed=1.5;fluidViscosity=0.02;fluidColor='#ffb703';} });
+btns.mech.addEventListener('click', () => { mechMode = (mechMode + 1) % 3; btns.mech.innerText = mechMode === 0 ? '機構: 停止' : mechMode === 1 ? '機構: ピストン' : '機構: 回転運動'; });
+btns.clear.addEventListener('click', () => { drawnWalls = []; scale = 1.0; document.getElementById('zoomVal').innerText = 100; resizeCanvas(); });
+
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+let peakP = 0, peakV = 0;
+function animate() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    updatePointer();
+
+    ctx.save();
+    ctx.scale(scale, scale);
+
+    if (mechMode === 1) component.angle += 0.05;
+    if (mechMode === 2) component.angle += 0.05;
+
+    for(let i=0; i<particles.length; i++) {
+        let dens = 0; const pi = particles[i];
+        for(let j=0; j<particles.length; j++) { if(i!==j && Math.hypot(pi.x-particles[j].x, pi.y-particles[j].y)<15) dens++; }
+        pi.pressure = dens;
+    }
+
+    peakV = 0; peakP = 0;
+    const cos = Math.cos(component.angle), sin = Math.sin(component.angle);
+    const hw = component.width / 2, hh = component.height / 2;
+
+    particles.forEach(p => {
+        p.x += p.vx; p.y += p.vy;
+        if (p.vx < baseSpeed) p.vx += fluidViscosity;
+        
+        drawnWalls.forEach(line => {
+            line.forEach(w => { if (Math.hypot(p.x - w.x, p.y - w.y) < 10) { p.vx = -0.3; p.vy += (p.y > w.y) ? 1.2 : -1.2; } });
+        });
+
+        const dx = p.x - component.x, dy = p.y - component.y;
+        const rx = dx * cos + dy * sin, ry = -dx * sin + dy * cos;
+        if (Math.abs(rx) < hw && Math.abs(ry) < hh) { p.vx = -0.5; p.vy += (ry > 0) ? 2 : -2; }
+
+
